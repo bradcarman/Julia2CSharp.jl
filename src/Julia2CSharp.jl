@@ -50,9 +50,9 @@ function get_csharp_class_property(name::Symbol, ::Type{T}) where T
     getset = if name == :parent
         "{ get; set; }"
     else
-        "{ get; set; }" #TODO: sort out how to truely modifiy the property and reflect back to Julia (currently this is modifiable for a couple cases like SystemData.BaseTest.isvisible)
+        "{ get { return $Parent.$name; } set { $Parent.$name = value; } }" #TODO: sort out how to truely modifiy the property and reflect back to Julia (currently this is modifiable for a couple cases like SystemData.BaseTest.isvisible)
     end
-        
+    
     code = "public $typecode $name $getset"
 
     return code
@@ -316,7 +316,6 @@ function generate_csharp(namespace::String, type::Type)
         """)
     else
         code = string("""
-        using EmbeddedJulia;
         using System;
         using System.Runtime.InteropServices;
         
@@ -349,14 +348,8 @@ function generate_csharp(namespace::String, type::Type)
 
                 public $(nameof(type))Type $Parent;
                 private bool IsProtected = false;
-        
-                public $(nameof(type))($(nameof(type))Type structdata)
-                {
-                    $Parent = structdata;
-                    $(get_csharp_class_property_initializers(type))
-                }
 
-                public $(nameof(type))(IntPtr ptr, bool protect = false) : this(Marshal.PtrToStructure<$(nameof(type))Type>(ptr)) 
+                public $(nameof(type))(IntPtr ptr, bool protect = false)
                 { 
                     pointer = ptr; 
                     if (protect)
@@ -364,6 +357,9 @@ function generate_csharp(namespace::String, type::Type)
                         IsProtected=true;
                         Julia.gc_push(pointer);
                     }
+
+                    $Parent = Marshal.PtrToStructure<$(nameof(type))Type>(ptr);
+                    $(get_csharp_class_property_initializers(type))
                 }
     
                 $(get_csharp_class_properties(type))
@@ -387,17 +383,18 @@ function generate_csharp(namespace::String, type::Type)
 
 end
 
-function generate_csharp_method_vars(funs::Vector{Func})
+function generate_csharp_method_var(fun::Func)
 
     vars = String[]
-    for fun in funs
-        push!(vars, "private static IntPtr $(fun.name)_sym = Julia.jl_symbol(\"$(fun.name)\");")
-        push!(vars, "private static IntPtr $(fun.name)_fun = Julia.jl_get_global(module, $(fun.name)_sym);")
-    end
+    
+    push!(vars, "IntPtr $(fun.name)_sym = Julia.jl_symbol(\"$(fun.name)\");")
+    push!(vars, "IntPtr $(fun.name)_fun = Julia.jl_get_global(module, $(fun.name)_sym);")
 
     return join(vars, "\n")
 
 end
+
+
 
 
 # get_csharp_ret(::Type{String}) = "string"
@@ -515,7 +512,7 @@ function get_csharp_argpointerlist(args::Vector{Tuple{Symbol, Type}})
 end
 
 
-function generate_csharp_method_fun(fun::Func)
+function generate_csharp_method_fun(module_name::Symbol, fun::Func)
 
     if fun.async
         if !isnothing(fun.ret)
@@ -523,6 +520,9 @@ function generate_csharp_method_fun(fun::Func)
             ret  = convert_value("ret", fun.ret, :pointer, fun.protect)
             var="""public static async Task<$(get_csharp_class_type(fun.ret))> $(fun.name)($(get_csharp_args(fun.args)))
             {
+                IntPtr module = Julia.jl_eval_string("$module_name");
+                $(generate_csharp_method_var(fun))
+
                 $(get_csharp_args_to_pointers(fun.args))
 
                 IntPtr ret = await Julia.RunFunctionAsync($(fun.name)_fun $(get_csharp_argpointerlist(fun.args)));
@@ -533,6 +533,9 @@ function generate_csharp_method_fun(fun::Func)
         else
             var="""public static async Task $(fun.name)($(get_csharp_args(fun.args)))
             {    
+                IntPtr module = Julia.jl_eval_string("$module_name");
+                $(generate_csharp_method_var(fun))
+
                 $(get_csharp_args_to_pointers(fun.args))
     
                 await Julia.RunFunctionAsync($(fun.name)_fun $(get_csharp_argpointerlist(fun.args)));
@@ -544,6 +547,9 @@ function generate_csharp_method_fun(fun::Func)
             ret  = convert_value("ret", fun.ret, :pointer, fun.protect)
             var="""public static $(get_csharp_class_type(fun.ret)) $(fun.name)($(get_csharp_args(fun.args)))
             {
+                IntPtr module = Julia.jl_eval_string("$module_name");
+                $(generate_csharp_method_var(fun))
+
                 $(get_csharp_args_to_pointers(fun.args))
     
                 IntPtr ret = Julia.RunFunction($(fun.name)_fun $(get_csharp_argpointerlist(fun.args)));
@@ -554,6 +560,9 @@ function generate_csharp_method_fun(fun::Func)
         else
             var="""public static void $(fun.name)($(get_csharp_args(fun.args)))
             {
+                IntPtr module = Julia.jl_eval_string("$module_name");
+                $(generate_csharp_method_var(fun))
+
                 $(get_csharp_args_to_pointers(fun.args))
     
                 Julia.RunFunction($(fun.name)_fun $(get_csharp_argpointerlist(fun.args)));
@@ -566,11 +575,11 @@ function generate_csharp_method_fun(fun::Func)
     
 end
 
-function generate_csharp_method_parts(funs::Vector{Func})
+function generate_csharp_method_parts(module_name::Symbol, funs::Vector{Func})
     vars = String[]
     for fun in funs
 
-        var = generate_csharp_method_fun(fun)
+        var = generate_csharp_method_fun(module_name, fun)
 
         push!(vars, var)
     end
@@ -578,10 +587,9 @@ function generate_csharp_method_parts(funs::Vector{Func})
     return join(vars, "\n")
 end
 
-function generate_csharp_methods(namespace::String, funs::Vector{Func}, usings::Vector{String} = String[])
+function generate_csharp_methods(namespace::String, module_name::Symbol,  funs::Vector{Func}, usings::Vector{String} = String[])
 
     code = string("""
-    using EmbeddedJulia;
     using System;
     using System.Runtime.InteropServices;
     using System.Threading.Tasks;
@@ -592,10 +600,8 @@ function generate_csharp_methods(namespace::String, funs::Vector{Func}, usings::
    
         public static partial class Methods
         {
-            private static IntPtr module = Julia.jl_eval_string("$namespace");
-            $(generate_csharp_method_vars(funs))
             
-            $(generate_csharp_method_parts(funs))
+            $(generate_csharp_method_parts(module_name, funs))
 
         }
     
@@ -606,8 +612,8 @@ function generate_csharp_methods(namespace::String, funs::Vector{Func}, usings::
 
 end
 
-function generate_csharp_methods(namespace::String, funs::Vector{Func}, file::String, usings::Vector{String} = String[])
-    code = generate_csharp_methods(namespace, funs, usings)
+function generate_csharp_methods(namespace::String, module_name::Symbol, funs::Vector{Func}, file::String, usings::Vector{String} = String[])
+    code = generate_csharp_methods(namespace, module_name, funs, usings)
     open(file, "w") do io
         write(io, code)
     end
