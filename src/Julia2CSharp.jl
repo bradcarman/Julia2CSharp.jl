@@ -45,12 +45,27 @@ get_csharp_class_property(name::Symbol, ::Type{Union{Nothing, T}}) where T = get
 function get_csharp_class_property(name::Symbol, ::Type{T}) where T
     
     typecode = get_csharp_class_type(T)
+    typestruct = get_csharp_struct_type(T)
 
     #incase of parent circular reference problem, we allow a setter so the parent can be set in c#
     getset = if name == :parent
         "{ get; set; }"
+    elseif typestruct == "IntPtr"
+        "{ get; set; }"
     else
-        "{ get { return $Parent.$name; } set { $Parent.$name = value; } }" #TODO: sort out how to truely modifiy the property and reflect back to Julia (currently this is modifiable for a couple cases like SystemData.BaseTest.isvisible)
+        """
+        { 
+            get { return $Parent.$name; } 
+            set 
+            { 
+                $Parent.$name = value; 
+                $(get_csharp_property_setter(name, T))
+            } 
+        }
+        """ 
+        
+        
+        #TODO: sort out how to truely modifiy the property and reflect back to Julia (currently this is modifiable for a couple cases like SystemData.BaseTest.isvisible)
     end
     
     code = "public $typecode $name $getset"
@@ -438,10 +453,12 @@ function get_csharp_arg_to_pointer(i::Int, name::Symbol, ::Type{T}) where T
         Marshal.StructureToPtr($name, ptr, true);
         IntPtr arg$i = Julia.jl_eval_string(String.Format("p = Ptr{{$type}}({0}); t = unsafe_load(p); t", ptr.ToInt64()));
         """
+    elseif T <: AbstractString
+        "IntPtr arg$i = $(get_csharp_pointer(name, T));"
     elseif ismutabletype(T)
         "IntPtr arg$i = $name.Pointer;"
     else
-        "IntPtr arg$i = $name.Pointer;"
+        "IntPtr arg$i = $(get_csharp_pointer(name, T));"
     end
 
 end
@@ -488,10 +505,22 @@ function get_csharp_to_pointer(::Type{T}) where T
 
 end
 
+# Simple types
+get_csharp_pointer(name::Symbol, ::Type{T}) where T = nothing
+get_csharp_pointer(name::Symbol, ::Type{String}) = "Julia.jl_cstr_to_string($name)";
+get_csharp_pointer(name::Symbol, ::Type{Int64}) = "Julia.jl_box_int64($name)";
+get_csharp_pointer(name::Symbol, ::Type{Float64}) = "Julia.jl_box_float64($name)";
 
-get_csharp_arg_to_pointer(i::Int, name::Symbol, ::Type{String}) = "IntPtr arg$i = Julia.jl_cstr_to_string($(name));"
-get_csharp_arg_to_pointer(i::Int, name::Symbol, ::Type{Int64}) = "IntPtr arg$i = Julia.jl_box_int64($(name));"
-get_csharp_arg_to_pointer(i::Int, name::Symbol, ::Type{Float64}) = "IntPtr arg$i = Julia.jl_box_float64($(name));"
+function get_csharp_property_setter(name::Symbol, ::Type{T}) where T
+    pointer_code = get_csharp_pointer(name, T)
+    if !isnothing(pointer_code)
+        return "Julia.RunFunction(Julia.setproperty_fun, Pointer, Julia.jl_symbol(\"$name\"), $(get_csharp_pointer(:value, T)) );"
+    else
+        # Complex type, doesn't need a setter
+        return "//$T setter not defined"
+    end
+end
+
 
 function get_csharp_args_to_pointers(args::Vector{Tuple{Symbol, Type}})
     argstr = String[]
