@@ -650,14 +650,13 @@ function generate_csharp_method_parts(module_name::Symbol, funs::Vector{Func})
     return join(vars, "\n")
 end
 
-function generate_csharp_methods(namespace::String, module_name::Symbol,  funs::Vector{Func}, usings::Vector{String} = String[])
+function generate_csharp_methods(namespace::String, module_name::Symbol,  funs::Vector{Func})
 
     code = string("""
     $(join(usings, '\n'))
     using System;
     using System.Runtime.InteropServices;
     using System.Threading.Tasks;
-    $(join(["using $u;" for u in usings], '\n'))
     
     namespace $namespace
     {
@@ -676,8 +675,8 @@ function generate_csharp_methods(namespace::String, module_name::Symbol,  funs::
 
 end
 
-function generate_csharp_methods(namespace::String, module_name::Symbol, funs::Vector{Func}, file::String, usings::Vector{String} = String[])
-    code = generate_csharp_methods(namespace, module_name, funs, usings)
+function generate_csharp_methods(namespace::String, module_name::Symbol, funs::Vector{Func}, file::String)
+    code = generate_csharp_methods(namespace, module_name, funs)
     open(file, "w") do io
         write(io, code)
     end
