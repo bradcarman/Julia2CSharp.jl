@@ -1,9 +1,10 @@
 name = "Julia2CSharp"
 uuid = "03ff0f5a-405a-4651-8122-c47bd8c6ed10"
 authors = ["Brad Carman <bradleygcarman@outlook.com>"]
-version = "0.1.0"
+version = "0.2.0"
 
-
+[compat]
+julia = "1"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"

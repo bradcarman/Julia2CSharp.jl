@@ -31,3 +31,6 @@ Julia2CSharp.generate_csharp_methods("<--C# Namespace-->", :<--Module-->, funs, 
 ```
 
 See https://github.com/bradcarman/ActiveSuspensionModel for an example of Julia2CSharp applied.
+
+# Version History
+- v0.2.0: c# classes are now properly initialized either by pointer or struct.  If by pointer, garbage collection is implemented first to ensure Julia cannot delete the pointer before it is marshalled to c#

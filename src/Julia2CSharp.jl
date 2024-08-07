@@ -2,6 +2,11 @@ module Julia2CSharp
 
 const Parent = "Data"
 
+const usings = String[]
+
+function add_usings(reference::String)
+    push!(usings, reference)
+end
 
 struct Func
     name::Symbol
@@ -39,33 +44,36 @@ function format_csharp(code::String)
 end
 
 #TODO: What is this doing???
-get_csharp_class_property(name::Symbol, ::Type{Union{Nothing, T}}) where T = get_csharp_class_property(name, T)
+get_csharp_class_property(name::Symbol, ::Type{Union{Nothing, T}}, is_parent_mutable::Bool) where T = get_csharp_class_property(name, T)
 
 #TODO: setting to immutable { get; }, need to implement some way to reflect mutaded class back to Julia memory
-function get_csharp_class_property(name::Symbol, ::Type{T}) where T
+function get_csharp_class_property(name::Symbol, ::Type{T}, is_parent_mutable::Bool) where T
     
     typecode = get_csharp_class_type(T)
     typestruct = get_csharp_struct_type(T)
 
-    #incase of parent circular reference problem, we allow a setter so the parent can be set in c#
+    #TODO: clean up this code, just need to check if the type is a basic type that has a box/unbox function...
     getset = if name == :parent
-        "{ get; set; }"
+        "{ get; set; }"  #incase of parent circular reference problem, we allow a setter so the parent can be set in c#
     elseif typestruct == "IntPtr"
-        "{ get; set; }"
-    else
+        "{ get; private set; }"
+    elseif typestruct == "$(nameof(T))Type" 
+        "{ get; private set; }"
+    elseif is_parent_mutable
         """
         { 
-            get { return $Parent.$name; } 
+            get { return $(convert_value("$Parent.$name",T,Val(:struct),true)); } 
             set 
             { 
-                $Parent.$name = value; 
+                $Parent.$name = $(convert_value("value",T,Val(:class),true)); 
                 $(get_csharp_property_setter(name, T))
             } 
         }
         """ 
-        
-        
-        #TODO: sort out how to truely modifiy the property and reflect back to Julia (currently this is modifiable for a couple cases like SystemData.BaseTest.isvisible)
+    else
+        """
+        { get { return $(convert_value("$Parent.$name",T,Val(:struct),true)); } }
+        """ 
     end
     
     code = "public $typecode $name $getset"
@@ -86,13 +94,21 @@ end
 
 function get_csharp_class_property_initializer(name::Symbol, type::Type) 
     
+    typestruct = get_csharp_struct_type(type)
     valuecode = convert_value("$Parent.$name", type, :struct, false)
 
     #TODO: This code helps prevent the circular reference that occurs with the Test structure which references the Project parent.  Is there a better way to handle this???
     if string(name) == "parent"
         return "//avoiding circular reference... $name = $valuecode;"
+    elseif typestruct == "IntPtr"
+        return "$name = $valuecode;"  # ex. Julia.GetString(Data.variable);
+    elseif typestruct == "$(nameof(type))Type" 
+        return "$name = $valuecode;"  # ex. new Unit(Data.unit)
+    # elseif is_parent_mutable
+    #     return "//$name = $Parent.$name"
+    else
+        return "//$name = $Parent.$name"
     end
-
 
     return "$name = $valuecode;"    
 end
@@ -102,6 +118,7 @@ function get_csharp_class_type(::Type{T}) where T
     @show T 
     return nameof(T)
 end
+
 function get_csharp_struct_type(::Type{T}) where T
    
     if T <: Enum
@@ -218,16 +235,19 @@ convert_value(input::String, ::Type{Symbol}, ::Val, ::Bool) = "Julia.GetString(J
 get_csharp_class_type(::Type{UInt8}) = "byte"
 get_csharp_struct_type(::Type{UInt8}) = "byte"
 convert_value(input::String, ::Type{UInt8}, ::Val{:struct}, ::Bool) = input 
+convert_value(input::String, ::Type{UInt8}, ::Val{:class}, ::Bool) = input 
 convert_value(input::String, ::Type{UInt8}, ::Val{:pointer}, ::Bool) = error("not implemented yet") #TODO: How to unbox a UInt8 pointer?
 
 get_csharp_class_type(::Type{Int64}) = "Int64"
 get_csharp_struct_type(::Type{Int64}) = "Int64"
-convert_value(input::String, ::Type{Int64}, ::Val{:struct}, ::Bool) = input 
+convert_value(input::String, ::Type{Int64}, ::Val{:struct}, ::Bool) = input
+convert_value(input::String, ::Type{Int64}, ::Val{:class}, ::Bool) = input
 convert_value(input::String, ::Type{Int64}, ::Val{:pointer}, ::Bool) = "Julia.GetInt64($input)"
 
 get_csharp_class_type(::Type{Int32}) = "int"
 get_csharp_struct_type(::Type{Int32}) = "int"
 convert_value(input::String, ::Type{Int32}, ::Val{:struct}, ::Bool) = input
+convert_value(input::String, ::Type{Int32}, ::Val{:class}, ::Bool) = input
 convert_value(input::String, ::Type{Int32}, ::Val{:pointer}, ::Bool) = "Julia.GetInt32($input)"
 
 #Note: Julia stores boolean as byte!
@@ -236,12 +256,14 @@ get_csharp_class_type(::Type{Bool}) = "bool"
 get_csharp_struct_type(::Type{Bool}) = "byte"
 convert_value(input::String, ::Type{Ref{Bool}}, ::Val{:struct}, ::Bool) = "Julia.jl_unbox_bool($input)"
 convert_value(input::String, ::Type{Bool}, ::Val{:struct}, ::Bool) = "Convert.ToBoolean($input)"
+convert_value(input::String, ::Type{Bool}, ::Val{:class}, ::Bool) = "Convert.ToByte($input)"
 convert_value(input::String, ::Type{Bool}, ::Val{:pointer}, ::Bool) = "Julia.jl_unbox_bool($input)" 
 
 
 get_csharp_class_type(::Type{Float64}) = "double"
 get_csharp_struct_type(::Type{Float64}) = "double"
 convert_value(input::String, ::Type{Float64}, ::Val{:struct}, ::Bool) = input
+convert_value(input::String, ::Type{Float64}, ::Val{:class}, ::Bool) = input
 convert_value(input::String, ::Type{Float64}, ::Val{:pointer}, ::Bool) = "Julia.jl_unbox_float64($input)"
 
 
@@ -251,7 +273,7 @@ function get_csharp_class_properties(type::Type)
 
     class_props = String[]
     for i=1:length(names)
-        push!(class_props, get_csharp_class_property(names[i], types[i]))
+        push!(class_props, get_csharp_class_property(names[i], types[i], ismutabletype(type)))
     end
 
     return join(class_props, "\n" )
@@ -317,7 +339,7 @@ function generate_csharp(namespace::String, type::Type)
     local code
     if type <: Enum
         code = string("""
-        using EmbeddedJulia;
+        $(join(usings, '\n'))
         using System;
         using System.Runtime.InteropServices;
         
@@ -331,6 +353,7 @@ function generate_csharp(namespace::String, type::Type)
         """)
     else
         code = string("""
+        $(join(usings, '\n'))
         using System;
         using System.Runtime.InteropServices;
         
@@ -364,6 +387,17 @@ function generate_csharp(namespace::String, type::Type)
                 public $(nameof(type))Type $Parent;
                 private bool IsProtected = false;
 
+                private void initialize($(nameof(type))Type structdata)
+                {
+                    $Parent = structdata;        
+                    $(get_csharp_class_property_initializers(type))        
+                }
+
+                public $(nameof(type))($(nameof(type))Type structdata)
+                {
+                    initialize(structdata);
+                }
+
                 public $(nameof(type))(IntPtr ptr, bool protect = false)
                 { 
                     pointer = ptr; 
@@ -373,8 +407,7 @@ function generate_csharp(namespace::String, type::Type)
                         Julia.gc_push(pointer);
                     }
 
-                    $Parent = Marshal.PtrToStructure<$(nameof(type))Type>(ptr);
-                    $(get_csharp_class_property_initializers(type))
+                    initialize(Marshal.PtrToStructure<$(nameof(type))Type>(ptr));
                 }
     
                 $(get_csharp_class_properties(type))
@@ -510,6 +543,7 @@ get_csharp_pointer(name::Symbol, ::Type{T}) where T = nothing
 get_csharp_pointer(name::Symbol, ::Type{String}) = "Julia.jl_cstr_to_string($name)";
 get_csharp_pointer(name::Symbol, ::Type{Int64}) = "Julia.jl_box_int64($name)";
 get_csharp_pointer(name::Symbol, ::Type{Float64}) = "Julia.jl_box_float64($name)";
+get_csharp_pointer(name::Symbol, ::Type{Bool}) = "Julia.jl_box_bool($name)";
 
 function get_csharp_property_setter(name::Symbol, ::Type{T}) where T
     pointer_code = get_csharp_pointer(name, T)
@@ -619,6 +653,7 @@ end
 function generate_csharp_methods(namespace::String, module_name::Symbol,  funs::Vector{Func}, usings::Vector{String} = String[])
 
     code = string("""
+    $(join(usings, '\n'))
     using System;
     using System.Runtime.InteropServices;
     using System.Threading.Tasks;
