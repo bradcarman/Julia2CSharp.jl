@@ -115,7 +115,6 @@ end
     
 
 function get_csharp_class_type(::Type{T}) where T 
-    @show T 
     return nameof(T)
 end
 
@@ -486,12 +485,14 @@ function get_csharp_arg_to_pointer(i::Int, name::Symbol, ::Type{T}) where T
         Marshal.StructureToPtr($name, ptr, true);
         IntPtr arg$i = Julia.jl_eval_string(String.Format("p = Ptr{{$type}}({0}); t = unsafe_load(p); t", ptr.ToInt64()));
         """
-    elseif T <: AbstractString
-        "IntPtr arg$i = $(get_csharp_pointer(name, T));"
-    elseif ismutabletype(T)
-        "IntPtr arg$i = $name.Pointer;"
     else
-        "IntPtr arg$i = $(get_csharp_pointer(name, T));"
+        pointer_code = get_csharp_pointer(name, T)
+        if isnothing(pointer_code)
+            "IntPtr arg$i = $name.Pointer;"
+        else
+            "IntPtr arg$i = $(pointer_code);"
+        end
+        
     end
 
 end
